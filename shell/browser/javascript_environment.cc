@@ -54,7 +54,9 @@ v8::Isolate* JavascriptEnvironment::Initialize(uv_loop_t* event_loop) {
       base::RecommendedMaxNumberOfThreadsInThreadGroup(3, 8, 0.1, 0),
       tracing_controller);
 
+  node::SetMainThreadMultiIsolatePlatform(platform_);
   v8::V8::InitializePlatform(platform_);
+
   gin::IsolateHolder::Initialize(gin::IsolateHolder::kNonStrictMode,
                                  gin::ArrayBufferAllocator::SharedInstance(),
                                  nullptr /* external_reference_table */,

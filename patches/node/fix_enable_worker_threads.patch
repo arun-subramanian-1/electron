@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Shelley Vohr <shelley.vohr@gmail.com>
+Date: Thu, 3 Oct 2019 19:03:30 +0200
+Subject: fix: enable worker_threads
+
+Electron sets NODE_USE_V8_PLATFORM to false, because Electron
+initializes the v8 platform itself and Node.js worker thread
+initialization relies on the platform it uses having been set inside
+code guarded by NODE_USE_V8_PLATFORM.
+
+This commit fixes this problem by introducing a new way to set the
+MultiIsolatePlatform on which we'll be registering an Isolate, so that
+we don't crash on the same EXC_BAD_ACCESS error that occurred when we
+tried to call RegisterIsolate on a nullptr.
+
+diff --git a/src/api/environment.cc b/src/api/environment.cc
+index 4d79af9ec2a7b476c5f86f3882f4fb63afafc53e..e987e16ab5da09d5238a4cd508f0970d7542efdd 100644
+--- a/src/api/environment.cc
++++ b/src/api/environment.cc
+@@ -319,6 +319,10 @@ Environment* GetCurrentEnvironment(Local<Context> context) {
+   return Environment::GetCurrent(context);
+ }
+ 
++void SetMainThreadMultiIsolatePlatform(MultiIsolatePlatform* platform) {
++  per_process::v8_platform.SetPlatform(static_cast<node::NodePlatform*>(platform));
++}
++
+ MultiIsolatePlatform* GetMainThreadMultiIsolatePlatform() {
+   return per_process::v8_platform.Platform();
+ }
+diff --git a/src/node.h b/src/node.h
+index 211f00cca65eeba317a03af36411a19a6befae18..7355a9a749d36b08937bfdfc0fd05f99070b985e 100644
+--- a/src/node.h
++++ b/src/node.h
+@@ -344,6 +344,7 @@ NODE_EXTERN Environment* GetCurrentEnvironment(v8::Local<v8::Context> context);
+ // If NODE_USE_V8_PLATFORM haven't been defined when Node.js was built,
+ // it returns nullptr.
+ NODE_EXTERN MultiIsolatePlatform* GetMainThreadMultiIsolatePlatform();
++NODE_EXTERN void SetMainThreadMultiIsolatePlatform(MultiIsolatePlatform* platform);
+ 
+ NODE_EXTERN node::tracing::Agent* CreateAgent();
+ 
+diff --git a/src/node_v8_platform-inl.h b/src/node_v8_platform-inl.h
+index e36f0a7d88bea4ece0172f1a454513ad693a192c..40684121068fe00136e7a1121e1e5fdec498c202 100644
+--- a/src/node_v8_platform-inl.h
++++ b/src/node_v8_platform-inl.h
+@@ -148,9 +148,22 @@ struct V8Platform {
+   NodePlatform* platform_;
+ #else   // !NODE_USE_V8_PLATFORM
+   inline void Initialize(int thread_pool_size) {}
+-  inline void Dispose() {}
+-  inline void DrainVMTasks(v8::Isolate* isolate) {}
+-  inline void CancelVMTasks(v8::Isolate* isolate) {}
++  inline void Dispose() {
++    if (platform_) {
++      platform_->Shutdown();
++      delete platform_;
++      platform_ = nullptr;
++    }
++  }
++  inline void SetPlatform(NodePlatform* platform) { platform_ = platform; }
++  inline void DrainVMTasks(v8::Isolate* isolate) {
++    if (platform_)
++      platform_->DrainTasks(isolate);
++  }
++  inline void CancelVMTasks(v8::Isolate* isolate) {
++    if (platform_)
++      platform_->CancelPendingDelayedTasks(isolate);
++  }
+   inline void StartTracingAgent() {
+     if (!per_process::cli_options->trace_event_categories.empty()) {
+       fprintf(stderr,
+@@ -162,7 +175,9 @@ struct V8Platform {
+ 
+   inline tracing::AgentWriterHandle* GetTracingAgentWriter() { return nullptr; }
+ 
+-  inline NodePlatform* Platform() { return nullptr; }
++  inline NodePlatform* Platform() { return platform_; }
++
++  NodePlatform* platform_;
+ #endif  // !NODE_USE_V8_PLATFORM
+ };
+ 
